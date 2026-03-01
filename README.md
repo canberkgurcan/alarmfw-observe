@@ -65,6 +65,17 @@ docker run -p 8001:8001 \
 
 ```bash
 oc apply -f ocp/deployment.yaml -n alarmfw-prod
+oc set image deployment/alarmfw-observe alarmfw-observe=REGISTRY/alarmfw-observe:TAG -n alarmfw-prod
 ```
 
-Pipeline: `Jenkinsfile`
+## Jenkins Pipeline
+
+4 stage: **Checkout SCM → Docker Build → Nexus Push → OCP Deploy**
+
+| Değişken | Açıklama |
+|---|---|
+| `REGISTRY_URL` | Nexus registry adresi |
+| `REGISTRY_CREDS` | Jenkins credential ID (Docker kullanıcı/şifre) |
+| `OCP_API_URL` | OpenShift API endpoint |
+| `OCP_TOKEN_CREDS` | Jenkins credential ID (OCP service account token) |
+| `DEPLOY_NAMESPACE` | Deploy namespace (ör: `alarmfw-prod`) |
