@@ -146,3 +146,46 @@ def list_events(
         raise
     except Exception as e:
         raise HTTPException(502, str(e))
+
+
+# ── Namespace Summary ─────────────────────────────────────────────────────────
+
+@router.get("/namespace-summary")
+def namespace_summary(
+    cluster:   str = Query(...),
+    namespace: str = Query(...),
+) -> Dict[str, Any]:
+    """Namespace özeti: pod fazları, toplam restart sayısı, Warning event sayısı."""
+    c = _resolve_cluster(cluster)
+    token = get_token(cluster)
+    running = failed = pending = total_restarts = 0
+    warning_events = 0
+
+    try:
+        pod_data = _ocp_get(c["ocp_api"], c["insecure"], token,
+                            f"/api/v1/namespaces/{namespace}/pods")
+        for item in pod_data.get("items", []):
+            phase = item.get("status", {}).get("phase", "")
+            if phase == "Running":   running += 1
+            elif phase == "Failed":  failed += 1
+            elif phase == "Pending": pending += 1
+            for cs in item.get("status", {}).get("containerStatuses", []):
+                total_restarts += cs.get("restartCount", 0)
+    except Exception:
+        pass
+
+    try:
+        ev_data = _ocp_get(c["ocp_api"], c["insecure"], token,
+                           f"/api/v1/namespaces/{namespace}/events",
+                           {"fieldSelector": "type=Warning"})
+        warning_events = len(ev_data.get("items", []))
+    except Exception:
+        pass
+
+    return {
+        "running":        running,
+        "failed":         failed,
+        "pending":        pending,
+        "total_restarts": total_restarts,
+        "warning_events": warning_events,
+    }

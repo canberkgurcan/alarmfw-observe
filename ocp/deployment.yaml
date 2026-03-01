@@ -1,0 +1,74 @@
+# alarmfw-observe — FastAPI gözlem API'si (port 8001)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alarmfw-observe
+  labels:
+    app: alarmfw-observe
+    app.kubernetes.io/part-of: alarmfw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alarmfw-observe
+  template:
+    metadata:
+      labels:
+        app: alarmfw-observe
+    spec:
+      containers:
+        - name: alarmfw-observe
+          image: REGISTRY_URL/alarmfw-observe:latest   # Jenkinsfile tarafından güncellenir
+          ports:
+            - containerPort: 8001
+          env:
+            - name: ALARMFW_CONFIG
+              value: /config
+            - name: ALARMFW_SECRETS
+              value: /secrets
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: secrets
+              mountPath: /secrets
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: alarmfw-config
+        - name: secrets
+          persistentVolumeClaim:
+            claimName: alarmfw-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alarmfw-observe
+  labels:
+    app: alarmfw-observe
+    app.kubernetes.io/part-of: alarmfw
+spec:
+  selector:
+    app: alarmfw-observe
+  ports:
+    - port: 8001
+      targetPort: 8001
