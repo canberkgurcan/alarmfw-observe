@@ -6,21 +6,29 @@ from config import (
     get_global_prometheus_token,
     get_global_prometheus_timeout_sec,
     get_global_prometheus_verify_tls,
+    get_cluster_prometheus_url,
+    get_cluster_prometheus_token,
 )
 
 router = APIRouter(prefix="/api/observe", tags=["observe"])
 
 
-def _prom_request(path: str, params: dict) -> dict:
-    prom_url = get_global_prometheus_url().rstrip("/")
+def _prom_request(path: str, params: dict, cluster: str = "") -> dict:
+    if cluster:
+        prom_url = get_cluster_prometheus_url(cluster).rstrip("/")
+        token    = get_cluster_prometheus_token(cluster)
+    else:
+        prom_url = get_global_prometheus_url().rstrip("/")
+        token    = get_global_prometheus_token()
+
     if not prom_url:
-        return {"ok": False, "error": "Prometheus URL tanımlanmamış (PROMETHEUS_URL env veya observe.yaml global.prometheus_url)", "result": []}
-    token = get_global_prometheus_token()
+        return {"ok": False, "error": "Prometheus URL tanımlanmamış — Secrets sayfasından cluster yapılandırın", "result": []}
     if not token:
-        return {"ok": False, "error": "Prometheus token bulunamadı — Secrets sayfasından prometheus.token ekleyin", "result": []}
+        return {"ok": False, "error": "Prometheus token bulunamadı — Secrets sayfasından cluster yapılandırın", "result": []}
+
     headers = {"Authorization": f"Bearer {token}"}
     timeout_sec = get_global_prometheus_timeout_sec()
-    verify_tls = get_global_prometheus_verify_tls()
+    verify_tls  = get_global_prometheus_verify_tls()
     try:
         resp = requests.get(
             f"{prom_url}{path}",
@@ -42,51 +50,53 @@ def _prom_request(path: str, params: dict) -> dict:
 
 @router.post("/promql")
 def run_promql(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Prometheus instant query. body: {query, time?}  (cluster artık global'dir, görmezden gelinir)"""
-    query = body.get("query", "").strip()
+    """Prometheus instant query. body: {query, time?, cluster?}"""
+    query   = body.get("query", "").strip()
+    cluster = body.get("cluster", "")
     if not query:
         return {"ok": False, "error": "Sorgu boş", "result": []}
     params: Dict[str, Any] = {"query": query}
     if body.get("time"):
         params["time"] = body["time"]
-    return _prom_request("/api/v1/query", params)
+    return _prom_request("/api/v1/query", params, cluster)
 
 
 # ── Range query ───────────────────────────────────────────────────────────────
 
 @router.post("/promql/range")
 def run_promql_range(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Prometheus range query. body: {query, start, end, step}"""
-    query = body.get("query", "").strip()
+    """Prometheus range query. body: {query, start, end, step, cluster?}"""
+    query   = body.get("query", "").strip()
+    cluster = body.get("cluster", "")
     if not query:
         return {"ok": False, "error": "Sorgu boş", "result": []}
     params: Dict[str, Any] = {"query": query}
     for k in ("start", "end", "step"):
         if body.get(k):
             params[k] = body[k]
-    return _prom_request("/api/v1/query_range", params)
+    return _prom_request("/api/v1/query_range", params, cluster)
 
 
 # ── Label helpers ─────────────────────────────────────────────────────────────
 
 @router.get("/promql/labels")
-def list_labels() -> Dict[str, Any]:
+def list_labels(cluster: str = Query("")) -> Dict[str, Any]:
     """Prometheus'taki tüm label adlarını döner."""
-    return _prom_request("/api/v1/labels", {})
+    return _prom_request("/api/v1/labels", {}, cluster)
 
 
 @router.get("/promql/label-values")
-def list_label_values(label: str = Query(...)) -> Dict[str, Any]:
+def list_label_values(label: str = Query(...), cluster: str = Query("")) -> Dict[str, Any]:
     """Belirtilen label'ın tüm değerlerini döner."""
-    return _prom_request(f"/api/v1/label/{label}/values", {})
+    return _prom_request(f"/api/v1/label/{label}/values", {}, cluster)
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 
 @router.get("/alerts")
-def get_alerts() -> Dict[str, Any]:
+def get_alerts(cluster: str = Query("")) -> Dict[str, Any]:
     """Prometheus'tan şu an firing olan alert listesi."""
-    return _prom_request("/api/v1/query", {"query": 'ALERTS{alertstate="firing"}'})
+    return _prom_request("/api/v1/query", {"query": 'ALERTS{alertstate="firing"}'}, cluster)
 
 
 # ── Pod Metrics ───────────────────────────────────────────────────────────────
@@ -95,6 +105,7 @@ def get_alerts() -> Dict[str, Any]:
 def get_pod_metrics(
     pod:       str = Query(...),
     namespace: str = Query(...),
+    cluster:   str = Query(""),
 ) -> Dict[str, Any]:
     """Pod başına container CPU (rate 5m, cores) ve Memory (working set, bytes)."""
     cpu = _prom_request("/api/v1/query", {
@@ -103,12 +114,12 @@ def get_pod_metrics(
             f'pod="{pod}",namespace="{namespace}",'
             f'container!="",container!="POD"}}[5m])) by (container)'
         ),
-    })
+    }, cluster)
     mem = _prom_request("/api/v1/query", {
         "query": (
             f'sum(container_memory_working_set_bytes{{'
             f'pod="{pod}",namespace="{namespace}",'
             f'container!="",container!="POD"}}) by (container)'
         ),
-    })
+    }, cluster)
     return {"cpu": cpu, "memory": mem}

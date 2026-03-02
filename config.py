@@ -42,11 +42,21 @@ def _load_observe_yaml() -> Dict[str, Any]:
     return _load_yaml(OBSERVE_CONF)
 
 
+def _observe_clusters_list() -> List[Dict[str, Any]]:
+    """observe.yaml'dan cluster listesini döner (list veya dict formatını destekler)."""
+    obs = _load_observe_yaml()
+    raw = obs.get("clusters") or []
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict) and c.get("name")]
+    # dict formatı (eski) — dönüştür
+    return [{"name": k, **v} for k, v in raw.items()]
+
+
 def get_clusters() -> Dict[str, Dict[str, Any]]:
     """
     generated/ yaml'larından ocp_pod_health clusterlarını toplar.
-    observe.yaml varsa Loki URL ve overrideları birleştirir.
-    Döner: {cluster_name: {name, ocp_api, insecure, token_file, loki_url}}
+    observe.yaml varsa Prometheus URL ve overrideları birleştirir.
+    Döner: {cluster_name: {name, ocp_api, insecure, token_file, prometheus_url, prometheus_token_file, loki_url}}
     """
     clusters: Dict[str, Dict[str, Any]] = {}
 
@@ -63,21 +73,29 @@ def get_clusters() -> Dict[str, Dict[str, Any]]:
                 if not name or name in clusters:
                     continue
                 clusters[name] = {
-                    "name":       name,
-                    "ocp_api":    params.get("ocp_api", "").rstrip("/"),
-                    "insecure":   str(params.get("ocp_insecure", "false")).lower() == "true",
-                    "token_file": str(ALARMFW_SECRETS / f"{name}.token"),
-                    "loki_url":   "",
+                    "name":                  name,
+                    "ocp_api":               params.get("ocp_api", "").rstrip("/"),
+                    "insecure":              str(params.get("ocp_insecure", "false")).lower() == "true",
+                    "token_file":            str(ALARMFW_SECRETS / f"{name}.token"),
+                    "prometheus_url":        "",
+                    "prometheus_token_file": "",
+                    "loki_url":              "",
                 }
 
-    obs = _load_observe_yaml()
-    for cname, cdata in (obs.get("clusters") or {}).items():
+    for cdata in _observe_clusters_list():
+        cname = cdata["name"]
         if cname in clusters:
             clusters[cname].update(cdata)
         else:
-            token_file = str(ALARMFW_SECRETS / f"{cname}.token")
-            clusters[cname] = {"name": cname, "ocp_api": "", "insecure": True,
-                                "token_file": token_file, "loki_url": "", **cdata}
+            clusters[cname] = {
+                "name":                  cname,
+                "ocp_api":               cdata.get("ocp_api", ""),
+                "insecure":              cdata.get("insecure", True),
+                "token_file":            str(ALARMFW_SECRETS / f"{cname}.token"),
+                "prometheus_url":        cdata.get("prometheus_url", ""),
+                "prometheus_token_file": cdata.get("prometheus_token_file", ""),
+                "loki_url":              cdata.get("loki_url", ""),
+            }
 
     return clusters
 
@@ -147,13 +165,35 @@ def get_global_prometheus_timeout_sec() -> int:
         return DEFAULT_PROM_TIMEOUT_SEC
 
 
+def get_cluster_prometheus_url(cluster_name: str) -> str:
+    """Per-cluster Prometheus URL — observe.yaml'dan."""
+    for c in _observe_clusters_list():
+        if c.get("name") == cluster_name:
+            return c.get("prometheus_url", "").strip()
+    return ""
+
+
+def get_cluster_prometheus_token(cluster_name: str) -> str:
+    """Per-cluster Prometheus token — token_file veya varsayılan dosyadan okur."""
+    for c in _observe_clusters_list():
+        if c.get("name") == cluster_name:
+            token_file = c.get("prometheus_token_file", "")
+            if token_file:
+                return _read_secret(Path(token_file))
+    # fallback: /secrets/<cluster>-prometheus.token
+    return _read_secret(ALARMFW_SECRETS / f"{cluster_name}-prometheus.token")
+
+
 def get_auth_status() -> Dict[str, Any]:
-    """Prometheus token dosyası var ve dolu mu?"""
-    token = get_global_prometheus_token()
+    """OCP token'ı olan herhangi bir cluster var mı? (Observe sayfası açılış kontrolü)"""
+    clusters = get_clusters()
+    any_ocp_token = any(
+        _read_secret(Path(c["token_file"])) for c in clusters.values() if c.get("token_file")
+    )
     prom_url = get_global_prometheus_url()
     return {
-        "logged_in":   bool(token),
-        "has_token":   bool(token),
+        "logged_in":    any_ocp_token or bool(clusters),
+        "has_token":    any_ocp_token,
         "has_prom_url": bool(prom_url),
     }
 
