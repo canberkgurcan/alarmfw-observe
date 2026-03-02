@@ -8,6 +8,7 @@ from config import (
     get_global_prometheus_verify_tls,
     get_cluster_prometheus_url,
     get_cluster_prometheus_token,
+    get_cluster_prometheus_insecure,
 )
 
 router = APIRouter(prefix="/api/observe", tags=["observe"])
@@ -28,7 +29,7 @@ def _prom_request(path: str, params: dict, cluster: str = "") -> dict:
 
     headers = {"Authorization": f"Bearer {token}"}
     timeout_sec = get_global_prometheus_timeout_sec()
-    verify_tls  = get_global_prometheus_verify_tls()
+    verify_tls  = (not get_cluster_prometheus_insecure(cluster)) if cluster else get_global_prometheus_verify_tls()
     try:
         resp = requests.get(
             f"{prom_url}{path}",

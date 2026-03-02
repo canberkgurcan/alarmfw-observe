@@ -173,6 +173,14 @@ def get_cluster_prometheus_url(cluster_name: str) -> str:
     return ""
 
 
+def get_cluster_prometheus_insecure(cluster_name: str) -> bool:
+    """Per-cluster Prometheus TLS doğrulama kapatma flag'i — observe.yaml'dan."""
+    for c in _observe_clusters_list():
+        if c.get("name") == cluster_name:
+            return _is_true(str(c.get("insecure", False)))
+    return False
+
+
 def get_cluster_prometheus_token(cluster_name: str) -> str:
     """Per-cluster Prometheus token — token_file veya varsayılan dosyadan okur."""
     for c in _observe_clusters_list():
