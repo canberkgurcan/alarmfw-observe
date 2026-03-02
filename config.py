@@ -206,11 +206,15 @@ def get_auth_status() -> Dict[str, Any]:
         bool(get_global_prometheus_token())
         or any(bool(get_cluster_prometheus_token(name)) for name in clusters)
     )
-    prom_url = get_global_prometheus_url()
+    # has_prom_url: global URL veya herhangi bir cluster'ın prometheus_url'i yeterliy
+    any_prom_url = (
+        bool(get_global_prometheus_url())
+        or any(bool(c.get("prometheus_url")) for c in clusters.values())
+    )
     return {
         "logged_in":    any_ocp_token or any_prom_token,
         "has_token":    any_ocp_token,
-        "has_prom_url": bool(prom_url),
+        "has_prom_url": any_prom_url,
     }
 
 
