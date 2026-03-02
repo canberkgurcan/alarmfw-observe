@@ -193,14 +193,22 @@ def get_cluster_prometheus_token(cluster_name: str) -> str:
 
 
 def get_auth_status() -> Dict[str, Any]:
-    """OCP token'ı olan herhangi bir cluster var mı? (Observe sayfası açılış kontrolü)"""
+    """
+    Observe sayfası açılış kontrolü.
+    logged_in: en az bir OCP token'ı VEYA Prometheus token'ı varsa True.
+    Sadece cluster tanımı var ama hiç token yoksa False döner (yanıltıcı "Bağlı" engellenir).
+    """
     clusters = get_clusters()
-    any_ocp_token = any(
+    any_ocp_token  = any(
         _read_secret(Path(c["token_file"])) for c in clusters.values() if c.get("token_file")
+    )
+    any_prom_token = (
+        bool(get_global_prometheus_token())
+        or any(bool(get_cluster_prometheus_token(name)) for name in clusters)
     )
     prom_url = get_global_prometheus_url()
     return {
-        "logged_in":    any_ocp_token or bool(clusters),
+        "logged_in":    any_ocp_token or any_prom_token,
         "has_token":    any_ocp_token,
         "has_prom_url": bool(prom_url),
     }

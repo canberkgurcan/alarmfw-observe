@@ -10,9 +10,12 @@ router = APIRouter(prefix="/api/observe/health", tags=["health"])
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _scalar(res: dict) -> int:
-    """Extract a count/scalar value from a Prometheus vector result."""
+    """Extract a count/scalar value from a Prometheus vector result.
+    Returns -1 when the query itself failed (Prometheus unreachable, bad query, etc.)
+    so callers can distinguish 'error' from 'genuinely zero'.
+    """
     if not res.get("ok"):
-        return 0
+        return -1
     results = res.get("result", [])
     if not results:
         return 0
@@ -35,6 +38,15 @@ def _par(queries: Dict[str, str], cluster: str, timeout: int = 25) -> Dict[str, 
 
 def _rows(res: dict) -> List[dict]:
     return res.get("result", []) if res.get("ok") else []
+
+
+def _par_result(raw: Dict[str, dict]) -> Dict[str, Any]:
+    """Build a detail-endpoint response from parallel query results.
+    Includes an 'errors' map so callers know which queries failed vs. returned empty data.
+    """
+    errors = {k: v.get("error", "query failed") for k, v in raw.items() if not v.get("ok")}
+    data   = {k: _rows(v) for k, v in raw.items()}
+    return {"ok": True, "errors": errors, **data}
 
 
 # ── Overview (30s polling) ─────────────────────────────────────────────────────
@@ -123,7 +135,7 @@ def health_nodes(cluster: str = Query("")) -> Dict[str, Any]:
         "disk":     'topk(30, (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100)',
     }
     raw = _par(queries, cluster)
-    return {"ok": True, **{k: _rows(v) for k, v in raw.items()}}
+    return _par_result(raw)
 
 
 # ── Workload Issues (15s polling) ─────────────────────────────────────────────
@@ -140,7 +152,7 @@ def health_workload(cluster: str = Query("")) -> Dict[str, Any]:
         "failed_jobs": 'topk(20, kube_job_status_failed > 0)',
     }
     raw = _par(queries, cluster)
-    return {"ok": True, **{k: _rows(v) for k, v in raw.items()}}
+    return _par_result(raw)
 
 
 # ── Capacity (15s polling) ────────────────────────────────────────────────────
@@ -167,7 +179,7 @@ def health_capacity(cluster: str = Query("")) -> Dict[str, Any]:
         ),
     }
     raw = _par(queries, cluster)
-    return {"ok": True, **{k: _rows(v) for k, v in raw.items()}}
+    return _par_result(raw)
 
 
 # ── Control Plane (15s polling) ───────────────────────────────────────────────
@@ -184,4 +196,4 @@ def health_controlplane(cluster: str = Query("")) -> Dict[str, Any]:
         "cert_expiry_7d":     'sum(apiserver_client_certificate_expiration_seconds_bucket{le="604800"}) or vector(0)',
     }
     raw = _par(queries, cluster)
-    return {"ok": True, **{k: _rows(v) for k, v in raw.items()}}
+    return _par_result(raw)

@@ -42,7 +42,11 @@ def _prom_request(path: str, params: dict, cluster: str = "") -> dict:
         data = resp.json()
         if data.get("status") != "success":
             return {"ok": False, "error": data.get("error") or "Prometheus returned non-success status", "result": []}
-        return {"ok": True, "result": data.get("data", {}).get("result", [])}
+        raw = data.get("data", {})
+        # /api/v1/labels and /api/v1/label/<x>/values return data as a list directly
+        if isinstance(raw, list):
+            return {"ok": True, "result": raw}
+        return {"ok": True, "result": raw.get("result", [])}
     except Exception as e:
         return {"ok": False, "error": str(e), "result": []}
 
