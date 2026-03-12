@@ -148,6 +148,62 @@ def list_events(
         raise HTTPException(502, str(e))
 
 
+# ── Pod Logs ──────────────────────────────────────────────────────────────────
+
+@router.get("/pod-logs")
+def get_pod_logs(
+    cluster:    str           = Query(...),
+    namespace:  str           = Query(...),
+    pod:        str           = Query(...),
+    container:  Optional[str] = Query(None),
+    tail_lines: int           = Query(200, ge=1, le=2000),
+    previous:   bool          = Query(False),
+) -> Dict[str, Any]:
+    """Pod log içeriği (son tail_lines satır, max 2000)."""
+    c = _resolve_cluster(cluster)
+    token = get_token(cluster)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    # container belirtilmemişse pod spec'ten otomatik seç
+    resolved_container = container
+    if not resolved_container:
+        try:
+            pod_data = _ocp_get(c["ocp_api"], c["insecure"], token,
+                                f"/api/v1/namespaces/{namespace}/pods/{pod}")
+            container_statuses = pod_data.get("status", {}).get("containerStatuses", [])
+            spec_containers = [co["name"] for co in pod_data.get("spec", {}).get("containers", [])]
+
+            if len(spec_containers) > 1:
+                # ready=False olan ilk container'ı seç (kırık olan); yoksa ilki
+                not_ready = [cs["name"] for cs in container_statuses if not cs.get("ready", True)]
+                resolved_container = not_ready[0] if not_ready else spec_containers[0]
+            elif len(spec_containers) == 1:
+                resolved_container = spec_containers[0]
+        except Exception:
+            pass  # container None kalırsa tek-container pod'larda OCP zaten döner
+
+    params: Dict[str, Any] = {"tailLines": tail_lines}
+    if resolved_container:
+        params["container"] = resolved_container
+    if previous:
+        params["previous"] = "true"
+
+    try:
+        resp = requests.get(
+            f"{c['ocp_api']}/api/v1/namespaces/{namespace}/pods/{pod}/log",
+            headers={"Authorization": f"Bearer {token}", "Accept": "text/plain"},
+            params=params,
+            timeout=30,
+            verify=not c["insecure"],
+        )
+        resp.raise_for_status()
+        return {"ok": True, "pod": pod, "container": resolved_container, "logs": resp.text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
 # ── Namespace Summary ─────────────────────────────────────────────────────────
 
 @router.get("/namespace-summary")
