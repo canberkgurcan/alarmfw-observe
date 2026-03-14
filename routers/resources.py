@@ -182,22 +182,43 @@ def get_pod_logs(
         except Exception:
             pass  # container None kalırsa tek-container pod'larda OCP zaten döner
 
-    params: Dict[str, Any] = {"tailLines": tail_lines}
+    log_url = f"{c['ocp_api']}/api/v1/namespaces/{namespace}/pods/{pod}/log"
+    log_headers = {"Authorization": f"Bearer {token}", "Accept": "text/plain"}
+    base_params: Dict[str, Any] = {"tailLines": tail_lines}
     if resolved_container:
-        params["container"] = resolved_container
-    if previous:
-        params["previous"] = "true"
+        base_params["container"] = resolved_container
+
+    def _fetch(params: Dict[str, Any]) -> requests.Response:
+        return requests.get(log_url, headers=log_headers, params=params,
+                            timeout=30, verify=not c["insecure"])
 
     try:
-        resp = requests.get(
-            f"{c['ocp_api']}/api/v1/namespaces/{namespace}/pods/{pod}/log",
-            headers={"Authorization": f"Bearer {token}", "Accept": "text/plain"},
-            params=params,
-            timeout=30,
-            verify=not c["insecure"],
-        )
-        resp.raise_for_status()
-        return {"ok": True, "pod": pod, "container": resolved_container, "logs": resp.text}
+        if previous:
+            resp = _fetch({**base_params, "previous": "true"})
+            if resp.status_code in (400, 404):
+                # previous log yok, mevcut log'a fallback
+                fallback_status = resp.status_code
+                resp = _fetch(base_params)
+                resp.raise_for_status()
+                return {
+                    "ok": True, "pod": pod, "container": resolved_container,
+                    "logs": resp.text, "previous": False,
+                    "fallback_used": True, "fallback_from_status": fallback_status,
+                }
+            resp.raise_for_status()
+            return {
+                "ok": True, "pod": pod, "container": resolved_container,
+                "logs": resp.text, "previous": True,
+                "fallback_used": False, "fallback_from_status": None,
+            }
+        else:
+            resp = _fetch(base_params)
+            resp.raise_for_status()
+            return {
+                "ok": True, "pod": pod, "container": resolved_container,
+                "logs": resp.text, "previous": False,
+                "fallback_used": False, "fallback_from_status": None,
+            }
     except HTTPException:
         raise
     except Exception as e:
