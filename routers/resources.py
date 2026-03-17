@@ -220,6 +220,13 @@ def get_pod_logs(
             return _handle_resp(resp, is_previous=True)
         else:
             resp = _fetch(base_params)
+            if resp.status_code == 406:
+                # Container backoff bekleme sürecinde (CrashLoopBackOff vb.) — previous log'a fallback
+                prev_resp = _fetch({**base_params, "previous": "true"})
+                if prev_resp.status_code in (400, 404):
+                    # Previous da yok (henüz hiç çalışmamış): unavailable döndür
+                    return _handle_resp(resp, is_previous=False)
+                return _handle_resp(prev_resp, is_previous=True, fallback_used=True, fallback_from_status=406)
             return _handle_resp(resp, is_previous=False)
     except HTTPException:
         raise
