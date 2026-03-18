@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from typing import Any, Dict, List, Optional
 import requests
+import time
 from config import get_clusters, get_token
 
 router = APIRouter(prefix="/api/observe", tags=["observe"])
@@ -162,25 +163,31 @@ def get_pod_logs(
     """Pod log içeriği (son tail_lines satır, max 2000)."""
     c = _resolve_cluster(cluster)
     token = get_token(cluster)
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # container belirtilmemişse pod spec'ten otomatik seç
+    # Pod durumunu al — container adı ve CrashLoopBackOff tespiti için
     resolved_container = container
-    if not resolved_container:
-        try:
-            pod_data = _ocp_get(c["ocp_api"], c["insecure"], token,
-                                f"/api/v1/namespaces/{namespace}/pods/{pod}")
-            container_statuses = pod_data.get("status", {}).get("containerStatuses", [])
-            spec_containers = [co["name"] for co in pod_data.get("spec", {}).get("containers", [])]
+    is_crash_loop = False
+    try:
+        pod_data = _ocp_get(c["ocp_api"], c["insecure"], token,
+                            f"/api/v1/namespaces/{namespace}/pods/{pod}")
+        container_statuses = pod_data.get("status", {}).get("containerStatuses", [])
+        spec_containers = [co["name"] for co in pod_data.get("spec", {}).get("containers", [])]
 
+        if not resolved_container:
             if len(spec_containers) > 1:
-                # ready=False olan ilk container'ı seç (kırık olan); yoksa ilki
                 not_ready = [cs["name"] for cs in container_statuses if not cs.get("ready", True)]
                 resolved_container = not_ready[0] if not_ready else spec_containers[0]
             elif len(spec_containers) == 1:
                 resolved_container = spec_containers[0]
-        except Exception:
-            pass  # container None kalırsa tek-container pod'larda OCP zaten döner
+
+        # CrashLoopBackOff tespiti: waiting.reason == "CrashLoopBackOff"
+        for cs in container_statuses:
+            waiting = cs.get("state", {}).get("waiting", {})
+            if waiting.get("reason") == "CrashLoopBackOff":
+                is_crash_loop = True
+                break
+    except Exception:
+        pass
 
     log_url = f"{c['ocp_api']}/api/v1/namespaces/{namespace}/pods/{pod}/log"
     log_headers = {"Authorization": f"Bearer {token}", "Accept": "text/plain"}
@@ -192,46 +199,68 @@ def get_pod_logs(
         return requests.get(log_url, headers=log_headers, params=params,
                             timeout=30, verify=not c["insecure"])
 
-    def _handle_resp(resp: requests.Response, is_previous: bool, fallback_used: bool = False, fallback_from_status: int = None):
-        if resp.status_code == 406:
-            # Container henüz başlamadı (Pending/ImagePullBackOff vb.) — log mevcut değil
-            return {
-                "ok": False, "pod": pod, "container": resolved_container,
-                "logs": None, "previous": is_previous,
-                "fallback_used": fallback_used, "fallback_from_status": fallback_from_status,
-                "unavailable": True,
-                "unavailable_reason": "Container henüz başlamadı veya log mevcut değil (406).",
-            }
+    def _success(resp: requests.Response, is_prev: bool, fallback_used: bool = False, fallback_from: int = None):
         resp.raise_for_status()
         return {
             "ok": True, "pod": pod, "container": resolved_container,
-            "logs": resp.text, "previous": is_previous,
-            "fallback_used": fallback_used, "fallback_from_status": fallback_from_status,
+            "logs": resp.text, "previous": is_prev,
+            "fallback_used": fallback_used, "fallback_from_status": fallback_from,
+        }
+
+    def _unavailable(reason: str, prev_status: int = None):
+        detail = f" (previous HTTP {prev_status})" if prev_status else ""
+        return {
+            "ok": False, "pod": pod, "container": resolved_container,
+            "logs": None, "previous": False, "unavailable": True,
+            "unavailable_reason": f"{reason}{detail}",
         }
 
     try:
         if previous:
+            # Kullanıcı doğrudan previous istedi
             resp = _fetch({**base_params, "previous": "true"})
-            if resp.status_code in (400, 404):
-                # previous log yok, mevcut log'a fallback
-                fallback_status = resp.status_code
-                resp = _fetch(base_params)
-                return _handle_resp(resp, is_previous=False, fallback_used=True, fallback_from_status=fallback_status)
-            return _handle_resp(resp, is_previous=True)
-        else:
-            resp = _fetch(base_params)
-            if resp.status_code == 406:
-                # Container backoff bekleme sürecinde (CrashLoopBackOff vb.) — previous log'a fallback
-                prev_resp = _fetch({**base_params, "previous": "true"})
-                if prev_resp.status_code == 200:
-                    return _handle_resp(prev_resp, is_previous=True, fallback_used=True, fallback_from_status=406)
-                # Previous başarısız (container yeniden başlamış olabilir) — current'ı bir kez daha dene
-                retry_resp = _fetch(base_params)
-                if retry_resp.status_code == 200:
-                    return _handle_resp(retry_resp, is_previous=False, fallback_used=True, fallback_from_status=406)
-                # Her iki deneme de başarısız
-                return _handle_resp(resp, is_previous=False)
-            return _handle_resp(resp, is_previous=False)
+            if resp.status_code == 200:
+                return _success(resp, is_prev=True)
+            resp2 = _fetch(base_params)
+            if resp2.status_code == 200:
+                return _success(resp2, is_prev=False, fallback_used=True)
+            return _unavailable("Log mevcut değil.")
+
+        if is_crash_loop:
+            # CrashLoopBackOff: önce previous log dene (son crash'in logları en güvenilir)
+            prev_resp = _fetch({**base_params, "previous": "true"})
+            if prev_resp.status_code == 200:
+                return _success(prev_resp, is_prev=True)
+
+            # Previous başarısız — container tam o an yeniden başlamış olabilir.
+            # Kısa aralıklarla current'ı dene (container kısa süre Running olacak).
+            for delay in (0, 2, 3):
+                if delay:
+                    time.sleep(delay)
+                cur_resp = _fetch(base_params)
+                if cur_resp.status_code == 200:
+                    return _success(cur_resp, is_prev=False, fallback_used=True,
+                                    fallback_from=prev_resp.status_code)
+
+            return _unavailable(
+                "CrashLoopBackOff: container backoff bekleme sürecinde, log yakalanamadı.",
+                prev_status=prev_resp.status_code,
+            )
+
+        # Normal akış (Running, Pending, vb.)
+        resp = _fetch(base_params)
+        if resp.status_code == 200:
+            return _success(resp, is_prev=False)
+        if resp.status_code == 406:
+            # Pending/ImagePullBackOff — previous dene
+            prev_resp = _fetch({**base_params, "previous": "true"})
+            if prev_resp.status_code == 200:
+                return _success(prev_resp, is_prev=True, fallback_used=True, fallback_from=406)
+            return _unavailable("Container henüz başlamadı veya log mevcut değil (406).",
+                                prev_status=prev_resp.status_code)
+        resp.raise_for_status()
+        return _unavailable("Beklenmedik durum.")
+
     except HTTPException:
         raise
     except Exception as e:
